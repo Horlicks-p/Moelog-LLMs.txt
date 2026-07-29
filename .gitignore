@@ -24,3 +24,6 @@ composer.lock
 /build/
 /dist/
 *.zip
+
+# Markdown 文件
+REPAIR_PLAN.md
