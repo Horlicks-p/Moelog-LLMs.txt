@@ -12,8 +12,9 @@ This plugin follows the emerging [`llms.txt` proposal](https://llmstxt.org/) for
   - Strips `header`, `footer`, `nav`, `aside`, `script`, `style`, and other non-content elements.
   - Converts the core content to standard Markdown using a DOMDocument-based recursive converter.
 - **Self-contained URLs**:
-  - Relative (`/path`) and protocol-relative (`//host/path`) URLs become absolute, so images and links still resolve once the Markdown is read outside the site's HTTP context.
-  - Links to your own published posts and pages are rewritten to their `.md` counterparts, keeping AI crawlers on the Markdown fast lane. Category, tag, attachment, query-string and external URLs are left untouched, so no link is rewritten into a 404.
+  - Root-relative (`/path`) and protocol-relative (`//host/path`) URLs become absolute, so images and links still resolve once the Markdown is read outside the site's HTTP context. Root-relative paths resolve against the site origin, exactly as a browser would read them — a subdirectory install is never prepended.
+  - Document-relative URLs (`image.jpg`, `../uploads/a.jpg`) are left untouched, since resolving them needs the containing document's own address. WordPress editors do not normally emit them.
+  - Links to your own published posts and pages are rewritten to their `.md` counterparts, keeping AI crawlers on the Markdown fast lane. Category, tag, attachment, query-string, external, and (on subdirectory installs) out-of-install URLs are left untouched, so no link is rewritten into a 404.
 - **Smart noise filtering**:
   - Temporarily removes `the_content` filter callbacks from configured noise sources (YARPP, ad injection plugins, related post widgets, etc.) before rendering Markdown.
   - Only the article body reaches the AI — no wasted context window.

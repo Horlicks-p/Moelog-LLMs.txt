@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Moelog LLMs.txt
  * Description: 為 AI 機器人提供 /llms.txt 索引與各文章/頁面的 Markdown 純文字版本（在 URL 後加 .md）。
- * Version:     1.2.0
+ * Version:     1.2.1
  * Author:      和製ホーリックス
  * License:     GPL-2.0+
  * Requires at least: 6.0

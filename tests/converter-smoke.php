@@ -99,11 +99,14 @@ $linked = new MoeLog_HTML_To_Markdown(
 
 $url_html = <<<'HTML'
 <img src="//cdn.example.com/a.jpg" alt="CDN">
-<img src="/wp-content/uploads/b.jpg" alt="站內圖">
+<img src="/wp-content/uploads/b.jpg" alt="root-relative 圖">
 <img src="https://other.example.org/c.jpg" alt="外部圖">
 <p><a href="https://example.com/blog/real-post/">站內文章</a></p>
-<p><a href="/real-post/">相對站內文章</a></p>
+<p><a href="/blog/real-post/">root-relative 站內文章</a></p>
+<p><a href="/real-post/">安裝目錄外的同名路徑</a></p>
+<p><a href="/other-app/page/">同網域的其他應用程式</a></p>
 <p><a href="https://example.com/blog/real-post/#section">帶錨點</a></p>
+<p><a href="https://example.com/blog/">網站首頁</a></p>
 <p><a href="https://example.com/blog/category/x/">分類頁</a></p>
 <p><a href="https://example.com/blog/real-post/?utm=1">帶 query</a></p>
 <p><a href="https://example.com/blog/files/doc.pdf">PDF</a></p>
@@ -115,10 +118,8 @@ HTML;
 $url_markdown = $linked->convert( $url_html );
 
 moelog_assert_contains( '![CDN](https://cdn.example.com/a.jpg)', $url_markdown, 'Protocol-relative image URLs must gain the site scheme.' );
-moelog_assert_contains( '![站內圖](https://example.com/blog/wp-content/uploads/b.jpg)', $url_markdown, 'Root-relative image URLs must become absolute.' );
 moelog_assert_contains( '![外部圖](https://other.example.org/c.jpg)', $url_markdown, 'External absolute URLs must stay untouched.' );
 moelog_assert_contains( '[站內文章](https://example.com/blog/real-post.md)', $url_markdown, 'Internal post links should point at the .md version.' );
-moelog_assert_contains( '[相對站內文章](https://example.com/blog/real-post.md)', $url_markdown, 'Relative internal links should be absolutized then rewritten.' );
 moelog_assert_contains( '[帶錨點](https://example.com/blog/real-post.md#section)', $url_markdown, 'Fragments must survive the .md rewrite.' );
 moelog_assert_contains( '[分類頁](https://example.com/blog/category/x/)', $url_markdown, 'URLs without a .md counterpart must not be rewritten.' );
 moelog_assert_contains( '[帶 query](https://example.com/blog/real-post/?utm=1)', $url_markdown, 'URLs carrying a query string must not be rewritten.' );
@@ -126,16 +127,37 @@ moelog_assert_contains( '[PDF](https://example.com/blog/files/doc.pdf)', $url_ma
 moelog_assert_contains( '[已是 md](https://example.com/blog/already.md)', $url_markdown, 'Already-.md URLs must not gain a second suffix.' );
 moelog_assert_contains( '[外部連結](https://external.example.net/page/)', $url_markdown, 'External links must not be rewritten.' );
 moelog_assert_contains( '[Email](mailto:someone@example.com)', $url_markdown, 'mailto: links must be left alone.' );
+moelog_assert_contains( '[網站首頁](https://example.com/blog/)', $url_markdown, 'The site home URL has no .md counterpart.' );
 
-moelog_assert_same(
-	false,
-	in_array( 'https://example.com/blog/files/doc.pdf', $resolver_calls, true ),
-	'Static file paths must be filtered out before any lookup happens.'
+// root-relative URL 依 URL 語意屬於 origin，不能接到含子目錄的 base URL 後面。
+moelog_assert_contains(
+	'![root-relative 圖](https://example.com/wp-content/uploads/b.jpg)',
+	$url_markdown,
+	'Root-relative URLs resolve against the origin, not against the WordPress subdirectory.'
 );
-moelog_assert_same(
-	false,
-	in_array( 'https://external.example.net/page/', $resolver_calls, true ),
-	'External hosts must never reach the resolver.'
+moelog_assert_contains(
+	'[root-relative 站內文章](https://example.com/blog/real-post.md)',
+	$url_markdown,
+	'A root-relative path inside the install directory still resolves to the same post.'
 );
+moelog_assert_contains(
+	'[安裝目錄外的同名路徑](https://example.com/real-post/)',
+	$url_markdown,
+	'/real-post/ is outside /blog and must not be rewritten into the blog post.'
+);
+moelog_assert_contains(
+	'[同網域的其他應用程式](https://example.com/other-app/page/)',
+	$url_markdown,
+	'Same-host URLs outside the WordPress install must stay untouched.'
+);
+
+foreach ( array(
+	'https://example.com/blog/files/doc.pdf' => 'Static file paths must be filtered out before any lookup happens.',
+	'https://external.example.net/page/'     => 'External hosts must never reach the resolver.',
+	'https://example.com/real-post/'         => 'Paths outside the install directory must not trigger a lookup.',
+	'https://example.com/other-app/page/'    => 'Other apps on the same host must not trigger a lookup.',
+) as $never_resolved => $message ) {
+	moelog_assert_same( false, in_array( $never_resolved, $resolver_calls, true ), $message );
+}
 
 echo "Converter smoke test passed.\n";

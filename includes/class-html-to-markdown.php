@@ -11,11 +11,28 @@ if ( ! defined( 'ABSPATH' ) ) {
 class MoeLog_HTML_To_Markdown {
 
 	/**
-	 * 網站根網址，用來把相對與 protocol-relative URL 轉成絕對網址。
+	 * 網站根網址（可能含子目錄），例如 https://example.com/blog。
 	 *
 	 * @var string
 	 */
 	private $base_url = '';
+
+	/**
+	 * base_url 的 origin，例如 https://example.com。
+	 *
+	 * root-relative URL（/path）依 URL 語意一律相對於 origin，
+	 * 不能接在含子目錄的 base_url 後面。
+	 *
+	 * @var string
+	 */
+	private $base_origin = '';
+
+	/**
+	 * WordPress 安裝所在的路徑，例如 /blog；安裝在網站根目錄時為空字串。
+	 *
+	 * @var string
+	 */
+	private $base_path = '';
 
 	/**
 	 * base_url 的 scheme，供 protocol-relative URL 補齊使用。
@@ -42,9 +59,19 @@ class MoeLog_HTML_To_Markdown {
 		$this->base_url = rtrim( (string) $base_url, '/' );
 
 		if ( '' !== $this->base_url ) {
-			$scheme = parse_url( $this->base_url, PHP_URL_SCHEME );
-			if ( is_string( $scheme ) && '' !== $scheme ) {
-				$this->base_scheme = strtolower( $scheme );
+			$parts = parse_url( $this->base_url );
+
+			if ( is_array( $parts ) && isset( $parts['scheme'], $parts['host'] ) ) {
+				$this->base_scheme = strtolower( $parts['scheme'] );
+				$this->base_origin = $this->base_scheme . '://' . strtolower( $parts['host'] );
+
+				if ( isset( $parts['port'] ) ) {
+					$this->base_origin .= ':' . $parts['port'];
+				}
+
+				if ( isset( $parts['path'] ) ) {
+					$this->base_path = rtrim( $parts['path'], '/' );
+				}
 			}
 		}
 
@@ -472,12 +499,13 @@ class MoeLog_HTML_To_Markdown {
 			return $this->base_scheme . ':' . $url;
 		}
 
-		// 站內絕對路徑：補上網站根網址。
-		if ( 0 === strpos( $url, '/' ) && '' !== $this->base_url ) {
-			return $this->base_url . $url;
+		// root-relative：依 URL 語意接到 origin，而非含子目錄的 base_url。
+		if ( 0 === strpos( $url, '/' ) && '' !== $this->base_origin ) {
+			return $this->base_origin . $url;
 		}
 
-		// 其餘相對路徑需要以當前文章路徑為基準，這裡無從得知，維持原樣。
+		// document-relative（image.jpg、../a.jpg）需要以當前文章網址為基準，
+		// 這裡無從得知，維持原樣。
 		return $url;
 	}
 
@@ -488,7 +516,7 @@ class MoeLog_HTML_To_Markdown {
 	 * 附件或首頁等沒有 `.md` 版本的網址轉成 404 連結。
 	 */
 	private function maybe_convert_internal_link( $url ) {
-		if ( null === $this->internal_link_resolver || '' === $this->base_url || '' === $url ) {
+		if ( null === $this->internal_link_resolver || '' === $this->base_origin || '' === $url ) {
 			return $url;
 		}
 
@@ -502,30 +530,31 @@ class MoeLog_HTML_To_Markdown {
 			return $url;
 		}
 
-		$base_parts = parse_url( $this->base_url );
-		if ( ! is_array( $base_parts ) || ! isset( $base_parts['host'] ) ) {
-			return $url;
+		$origin = strtolower( $parts['scheme'] ) . '://' . strtolower( $parts['host'] );
+		if ( isset( $parts['port'] ) ) {
+			$origin .= ':' . $parts['port'];
 		}
 
-		if ( strtolower( $parts['host'] ) !== strtolower( $base_parts['host'] ) ) {
+		if ( $origin !== $this->base_origin ) {
 			return $url;
 		}
 
 		$path = rtrim( $parts['path'], '/' );
 
 		// 首頁與已經是 .md 的網址不處理。
-		if ( '' === $path || 0 === substr_compare( $path, '.md', -3, 3, true ) ) {
+		if ( '' === $path || $path === $this->base_path || 0 === substr_compare( $path, '.md', -3, 3, true ) ) {
+			return $url;
+		}
+
+		// 子目錄安裝時，WordPress 安裝路徑以外的網址（同網域的其他應用程式）
+		// 不屬於本站內容，連查詢都不必送出。
+		if ( '' !== $this->base_path && 0 !== strpos( $path . '/', $this->base_path . '/' ) ) {
 			return $url;
 		}
 
 		// 明顯是靜態檔案的路徑先擋掉，省去一次查詢。
 		if ( preg_match( '/\.(?:jpe?g|png|gif|webp|svg|ico|pdf|zip|mp[34]|css|js|xml|json|txt)$/i', $path ) ) {
 			return $url;
-		}
-
-		$origin = $parts['scheme'] . '://' . $parts['host'];
-		if ( isset( $parts['port'] ) ) {
-			$origin .= ':' . $parts['port'];
 		}
 
 		// 傳給 resolver 的網址不含錨點，避免干擾 url_to_postid() 的解析。
