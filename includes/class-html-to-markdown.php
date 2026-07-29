@@ -11,6 +11,49 @@ if ( ! defined( 'ABSPATH' ) ) {
 class MoeLog_HTML_To_Markdown {
 
 	/**
+	 * 網站根網址，用來把相對與 protocol-relative URL 轉成絕對網址。
+	 *
+	 * @var string
+	 */
+	private $base_url = '';
+
+	/**
+	 * base_url 的 scheme，供 protocol-relative URL 補齊使用。
+	 *
+	 * @var string
+	 */
+	private $base_scheme = 'https';
+
+	/**
+	 * 判斷站內網址是否有對應 `.md` 版本的 callback。
+	 *
+	 * 由呼叫端注入（需要 WordPress 查詢），converter 本身不依賴 WordPress，
+	 * 未注入時所有連結維持原樣。
+	 *
+	 * @var callable|null
+	 */
+	private $internal_link_resolver = null;
+
+	/**
+	 * @param string        $base_url                網站根網址，通常是 home_url()。
+	 * @param callable|null $internal_link_resolver  接受絕對網址、回傳 bool 的 callback。
+	 */
+	public function __construct( $base_url = '', $internal_link_resolver = null ) {
+		$this->base_url = rtrim( (string) $base_url, '/' );
+
+		if ( '' !== $this->base_url ) {
+			$scheme = parse_url( $this->base_url, PHP_URL_SCHEME );
+			if ( is_string( $scheme ) && '' !== $scheme ) {
+				$this->base_scheme = strtolower( $scheme );
+			}
+		}
+
+		if ( is_callable( $internal_link_resolver ) ) {
+			$this->internal_link_resolver = $internal_link_resolver;
+		}
+	}
+
+	/**
 	 * 將 HTML 字串轉換為 Markdown。
 	 *
 	 * @param string $html
@@ -171,7 +214,9 @@ class MoeLog_HTML_To_Markdown {
 
 			// 連結
 			case 'a':
-				$href = $this->escape_url_destination( $node->getAttribute( 'href' ) );
+				$href = $this->absolutize_url( $node->getAttribute( 'href' ) );
+				$href = $this->maybe_convert_internal_link( $href );
+				$href = $this->escape_url_destination( $href );
 				$text = trim( $inner );
 				if ( empty( $text ) ) {
 					return '';
@@ -183,7 +228,7 @@ class MoeLog_HTML_To_Markdown {
 
 			// 圖片
 			case 'img':
-				$src = $this->get_image_source( $node );
+				$src = $this->absolutize_url( $this->get_image_source( $node ) );
 				$alt = $node->getAttribute( 'alt' );
 				if ( empty( $src ) ) {
 					return '';
@@ -402,6 +447,99 @@ class MoeLog_HTML_To_Markdown {
 	 */
 	private function escape_link_label( $text ) {
 		return str_replace( array( '\\', '[', ']' ), array( '\\\\', '\\[', '\\]' ), (string) $text );
+	}
+
+	/**
+	 * 將相對與 protocol-relative URL 轉成絕對網址。
+	 *
+	 * Markdown 檔案會被單獨取用，脫離原本的 HTTP context，
+	 * `//host/path` 沒有可繼承的 scheme，`/path` 也沒有可依據的網域。
+	 */
+	private function absolutize_url( $url ) {
+		$url = trim( (string) $url );
+
+		if ( '' === $url ) {
+			return '';
+		}
+
+		// 已有 scheme（http:、mailto:、data: 等）或純錨點，維持原樣。
+		if ( preg_match( '#^(?:[a-z][a-z0-9+.\-]*:|\#)#i', $url ) ) {
+			return $url;
+		}
+
+		// protocol-relative：補上與網站相同的 scheme。
+		if ( 0 === strpos( $url, '//' ) ) {
+			return $this->base_scheme . ':' . $url;
+		}
+
+		// 站內絕對路徑：補上網站根網址。
+		if ( 0 === strpos( $url, '/' ) && '' !== $this->base_url ) {
+			return $this->base_url . $url;
+		}
+
+		// 其餘相對路徑需要以當前文章路徑為基準，這裡無從得知，維持原樣。
+		return $url;
+	}
+
+	/**
+	 * 站內文章／頁面連結改指向 `.md` 版本，讓 AI 沿著連結繼續取得 Markdown。
+	 *
+	 * 是否有對應 `.md` 一律交由注入的 resolver 判斷，避免把分類、標籤、
+	 * 附件或首頁等沒有 `.md` 版本的網址轉成 404 連結。
+	 */
+	private function maybe_convert_internal_link( $url ) {
+		if ( null === $this->internal_link_resolver || '' === $this->base_url || '' === $url ) {
+			return $url;
+		}
+
+		$parts = parse_url( $url );
+		if ( ! is_array( $parts ) || ! isset( $parts['scheme'], $parts['host'], $parts['path'] ) ) {
+			return $url;
+		}
+
+		// 帶 query string 的網址（例如 ?p=123、?s=關鍵字）不轉換。
+		if ( isset( $parts['query'] ) && '' !== $parts['query'] ) {
+			return $url;
+		}
+
+		$base_parts = parse_url( $this->base_url );
+		if ( ! is_array( $base_parts ) || ! isset( $base_parts['host'] ) ) {
+			return $url;
+		}
+
+		if ( strtolower( $parts['host'] ) !== strtolower( $base_parts['host'] ) ) {
+			return $url;
+		}
+
+		$path = rtrim( $parts['path'], '/' );
+
+		// 首頁與已經是 .md 的網址不處理。
+		if ( '' === $path || 0 === substr_compare( $path, '.md', -3, 3, true ) ) {
+			return $url;
+		}
+
+		// 明顯是靜態檔案的路徑先擋掉，省去一次查詢。
+		if ( preg_match( '/\.(?:jpe?g|png|gif|webp|svg|ico|pdf|zip|mp[34]|css|js|xml|json|txt)$/i', $path ) ) {
+			return $url;
+		}
+
+		$origin = $parts['scheme'] . '://' . $parts['host'];
+		if ( isset( $parts['port'] ) ) {
+			$origin .= ':' . $parts['port'];
+		}
+
+		// 傳給 resolver 的網址不含錨點，避免干擾 url_to_postid() 的解析。
+		if ( ! call_user_func( $this->internal_link_resolver, $origin . $parts['path'] ) ) {
+			return $url;
+		}
+
+		$converted = $origin . $path . '.md';
+
+		if ( isset( $parts['fragment'] ) && '' !== $parts['fragment'] ) {
+			$converted .= '#' . $parts['fragment'];
+		}
+
+		return $converted;
 	}
 
 	/**

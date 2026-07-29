@@ -67,4 +67,75 @@ $converter->convert( '<p>second pass</p>' );
 moelog_assert_same( true, libxml_use_internal_errors(), 'A previously enabled libxml error state should remain enabled.' );
 libxml_use_internal_errors( false );
 
+// --- URL 絕對化與站內連結改寫 ---
+
+// 未注入 base URL 時 converter 仍可獨立使用：
+// protocol-relative 網址本身已含 host，只補 scheme；站內絕對路徑則無從解析，維持原樣。
+$standalone = new MoeLog_HTML_To_Markdown();
+moelog_assert_contains(
+	'![圖](https://cdn.example.com/a.jpg)',
+	$standalone->convert( '<img src="//cdn.example.com/a.jpg" alt="圖">' ),
+	'Protocol-relative URLs only need a scheme, so they are fixed even without a base URL.'
+);
+moelog_assert_contains(
+	'![圖](/wp-content/uploads/b.jpg)',
+	$standalone->convert( '<img src="/wp-content/uploads/b.jpg" alt="圖">' ),
+	'Without a base URL a root-relative path cannot be resolved and must stay as-is.'
+);
+
+$known_posts    = array(
+	'https://example.com/blog/real-post/' => true,
+	'https://example.com/blog/category/x/' => false,
+);
+$resolver_calls = array();
+
+$linked = new MoeLog_HTML_To_Markdown(
+	'https://example.com/blog',
+	function ( $url ) use ( $known_posts, &$resolver_calls ) {
+		$resolver_calls[] = $url;
+		return isset( $known_posts[ $url ] ) ? $known_posts[ $url ] : false;
+	}
+);
+
+$url_html = <<<'HTML'
+<img src="//cdn.example.com/a.jpg" alt="CDN">
+<img src="/wp-content/uploads/b.jpg" alt="站內圖">
+<img src="https://other.example.org/c.jpg" alt="外部圖">
+<p><a href="https://example.com/blog/real-post/">站內文章</a></p>
+<p><a href="/real-post/">相對站內文章</a></p>
+<p><a href="https://example.com/blog/real-post/#section">帶錨點</a></p>
+<p><a href="https://example.com/blog/category/x/">分類頁</a></p>
+<p><a href="https://example.com/blog/real-post/?utm=1">帶 query</a></p>
+<p><a href="https://example.com/blog/files/doc.pdf">PDF</a></p>
+<p><a href="https://example.com/blog/already.md">已是 md</a></p>
+<p><a href="https://external.example.net/page/">外部連結</a></p>
+<p><a href="mailto:someone@example.com">Email</a></p>
+HTML;
+
+$url_markdown = $linked->convert( $url_html );
+
+moelog_assert_contains( '![CDN](https://cdn.example.com/a.jpg)', $url_markdown, 'Protocol-relative image URLs must gain the site scheme.' );
+moelog_assert_contains( '![站內圖](https://example.com/blog/wp-content/uploads/b.jpg)', $url_markdown, 'Root-relative image URLs must become absolute.' );
+moelog_assert_contains( '![外部圖](https://other.example.org/c.jpg)', $url_markdown, 'External absolute URLs must stay untouched.' );
+moelog_assert_contains( '[站內文章](https://example.com/blog/real-post.md)', $url_markdown, 'Internal post links should point at the .md version.' );
+moelog_assert_contains( '[相對站內文章](https://example.com/blog/real-post.md)', $url_markdown, 'Relative internal links should be absolutized then rewritten.' );
+moelog_assert_contains( '[帶錨點](https://example.com/blog/real-post.md#section)', $url_markdown, 'Fragments must survive the .md rewrite.' );
+moelog_assert_contains( '[分類頁](https://example.com/blog/category/x/)', $url_markdown, 'URLs without a .md counterpart must not be rewritten.' );
+moelog_assert_contains( '[帶 query](https://example.com/blog/real-post/?utm=1)', $url_markdown, 'URLs carrying a query string must not be rewritten.' );
+moelog_assert_contains( '[PDF](https://example.com/blog/files/doc.pdf)', $url_markdown, 'Static files must not be rewritten.' );
+moelog_assert_contains( '[已是 md](https://example.com/blog/already.md)', $url_markdown, 'Already-.md URLs must not gain a second suffix.' );
+moelog_assert_contains( '[外部連結](https://external.example.net/page/)', $url_markdown, 'External links must not be rewritten.' );
+moelog_assert_contains( '[Email](mailto:someone@example.com)', $url_markdown, 'mailto: links must be left alone.' );
+
+moelog_assert_same(
+	false,
+	in_array( 'https://example.com/blog/files/doc.pdf', $resolver_calls, true ),
+	'Static file paths must be filtered out before any lookup happens.'
+);
+moelog_assert_same(
+	false,
+	in_array( 'https://external.example.net/page/', $resolver_calls, true ),
+	'External hosts must never reach the resolver.'
+);
+
 echo "Converter smoke test passed.\n";

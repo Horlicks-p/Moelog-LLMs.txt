@@ -206,11 +206,46 @@ class MoeLog_LLMS_Txt {
 			exit;
 		}
 
-		$converter = new MoeLog_HTML_To_Markdown();
-		$output    = self::build_markdown( $post, $converter );
+		// Plain Permalinks 下沒有可用的 .md 端點，此時不改寫站內連結。
+		$pretty_urls = '' !== (string) get_option( 'permalink_structure' );
+		$converter   = new MoeLog_HTML_To_Markdown(
+			home_url(),
+			$pretty_urls ? array( __CLASS__, 'internal_url_has_markdown' ) : null
+		);
+		$output = self::build_markdown( $post, $converter );
 
 		echo $output;
 		exit;
+	}
+
+	/**
+	 * 判斷站內網址是否對應到有 `.md` 版本的公開文章或頁面。
+	 *
+	 * 供轉換器改寫正文中的站內連結使用。分類、標籤、附件、草稿與
+	 * 密碼保護內容都會回傳 false，避免產生指向 404 的 `.md` 連結。
+	 */
+	public static function internal_url_has_markdown( $url ) {
+		static $cache = array();
+
+		$url = (string) $url;
+		if ( isset( $cache[ $url ] ) ) {
+			return $cache[ $url ];
+		}
+
+		$result  = false;
+		$post_id = url_to_postid( $url );
+
+		if ( $post_id ) {
+			$post   = get_post( $post_id );
+			$result = $post
+				&& 'publish' === $post->post_status
+				&& in_array( $post->post_type, array( 'post', 'page' ), true )
+				&& empty( $post->post_password );
+		}
+
+		$cache[ $url ] = $result;
+
+		return $result;
 	}
 
 	/**
