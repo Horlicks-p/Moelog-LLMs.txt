@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: PHP ${{ matrix.php }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 7.4 是外掛 header 宣告的最低版本，一併驗證未誤用較新語法。
+        php: [ '7.4', '8.4' ]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安裝 PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: dom, libxml, mbstring
+          coverage: none
+
+      - name: 語法檢查
+        run: find . -name '*.php' -not -path './vendor/*' -print0 | xargs -0 -n1 php -l
+
+      - name: Core smoke test
+        run: php tests/core-smoke.php
+
+      - name: Converter smoke test
+        run: php tests/converter-smoke.php

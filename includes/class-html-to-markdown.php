@@ -21,15 +21,33 @@ class MoeLog_HTML_To_Markdown {
 			return '';
 		}
 
-		$dom = new DOMDocument();
-		libxml_use_internal_errors( true );
-		$dom->loadHTML(
-			'<?xml encoding="UTF-8"><div id="moelog-llms-root">' . $html . '</div>',
-			LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD
-		);
-		libxml_clear_errors();
+		if ( ! class_exists( 'DOMDocument' ) || ! class_exists( 'DOMXPath' ) ) {
+			return wp_strip_all_tags( $html );
+		}
 
-		$root = $dom->getElementById( 'moelog-llms-root' );
+		$dom = new DOMDocument();
+		$previous_libxml_state = libxml_use_internal_errors( true );
+		$root = null;
+
+		try {
+			$document = '<!DOCTYPE html><html><head>'
+				. '<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">'
+				. '<meta charset="UTF-8"></head><body>'
+				. '<div id="moelog-llms-root">' . $html . '</div></body></html>';
+			$loaded = $dom->loadHTML( $document, LIBXML_NONET );
+
+			if ( $loaded ) {
+				$xpath = new DOMXPath( $dom );
+				$nodes = $xpath->query( '//div[@id="moelog-llms-root"]' );
+				if ( $nodes && $nodes->length > 0 ) {
+					$root = $nodes->item( 0 );
+				}
+			}
+		} finally {
+			libxml_clear_errors();
+			libxml_use_internal_errors( $previous_libxml_state );
+		}
+
 		if ( ! $root ) {
 			return wp_strip_all_tags( $html );
 		}
@@ -68,17 +86,26 @@ class MoeLog_HTML_To_Markdown {
 		}
 
 		$tag   = strtolower( $node->nodeName );
+		$skip_tags = array(
+			'script', 'style', 'nav', 'header', 'footer', 'aside', 'form',
+			'input', 'button', 'select', 'textarea', 'iframe', 'noscript',
+			'svg', 'canvas',
+		);
+		if ( in_array( $tag, $skip_tags, true ) ) {
+			return '';
+		}
+
 		$inner = $this->process_children( $node );
 
 		switch ( $tag ) {
 
 			// 標題
-			case 'h1': return "\n\n# " . trim( $inner ) . "\n\n";
-			case 'h2': return "\n\n## " . trim( $inner ) . "\n\n";
-			case 'h3': return "\n\n### " . trim( $inner ) . "\n\n";
-			case 'h4': return "\n\n#### " . trim( $inner ) . "\n\n";
-			case 'h5': return "\n\n##### " . trim( $inner ) . "\n\n";
-			case 'h6': return "\n\n###### " . trim( $inner ) . "\n\n";
+			case 'h1': return "\n\n# " . $this->normalize_single_line( $inner ) . "\n\n";
+			case 'h2': return "\n\n## " . $this->normalize_single_line( $inner ) . "\n\n";
+			case 'h3': return "\n\n### " . $this->normalize_single_line( $inner ) . "\n\n";
+			case 'h4': return "\n\n#### " . $this->normalize_single_line( $inner ) . "\n\n";
+			case 'h5': return "\n\n##### " . $this->normalize_single_line( $inner ) . "\n\n";
+			case 'h6': return "\n\n###### " . $this->normalize_single_line( $inner ) . "\n\n";
 
 			// 段落與換行
 			case 'p':  return "\n\n" . trim( $inner ) . "\n\n";
@@ -107,7 +134,7 @@ class MoeLog_HTML_To_Markdown {
 				if ( $node->parentNode && strtolower( $node->parentNode->nodeName ) === 'pre' ) {
 					return $node->nodeValue;
 				}
-				return '`' . $inner . '`';
+				return $this->format_inline_code( $node->nodeValue );
 
 			// 程式碼區塊
 			case 'pre':
@@ -122,19 +149,29 @@ class MoeLog_HTML_To_Markdown {
 				} else {
 					$code_content = $node->nodeValue;
 				}
-				return "\n\n```" . $lang . "\n" . trim( $code_content ) . "\n```\n\n";
+				$code_content = str_replace( array( "\r\n", "\r" ), "\n", $code_content );
+				$code_content = rtrim( $code_content, "\n" );
+				$fence        = str_repeat( '`', max( 3, $this->longest_backtick_run( $code_content ) + 1 ) );
+				return "\n\n" . $fence . $lang . "\n" . $code_content . "\n" . $fence . "\n\n";
 
 			// 引用
 			case 'blockquote':
-				$lines  = explode( "\n", trim( $inner ) );
-				$quoted = array_map( function ( $line ) {
-					return '> ' . $line;
-				}, $lines );
+				$lines      = explode( "\n", trim( $inner ) );
+				$quoted     = array();
+				$last_empty = false;
+				foreach ( $lines as $line ) {
+					$is_empty = '' === trim( $line );
+					if ( $is_empty && $last_empty ) {
+						continue;
+					}
+					$quoted[]  = '> ' . $line;
+					$last_empty = $is_empty;
+				}
 				return "\n\n" . implode( "\n", $quoted ) . "\n\n";
 
 			// 連結
 			case 'a':
-				$href = $node->getAttribute( 'href' );
+				$href = $this->escape_url_destination( $node->getAttribute( 'href' ) );
 				$text = trim( $inner );
 				if ( empty( $text ) ) {
 					return '';
@@ -142,16 +179,16 @@ class MoeLog_HTML_To_Markdown {
 				if ( empty( $href ) || $href === '#' ) {
 					return $text;
 				}
-				return '[' . $text . '](' . $href . ')';
+				return '[' . $this->escape_link_label( $text ) . '](' . $href . ')';
 
 			// 圖片
 			case 'img':
-				$src = $node->getAttribute( 'src' );
+				$src = $this->get_image_source( $node );
 				$alt = $node->getAttribute( 'alt' );
 				if ( empty( $src ) ) {
 					return '';
 				}
-				return '![' . $alt . '](' . $src . ')';
+				return '![' . $this->escape_link_label( $alt ) . '](' . $this->escape_url_destination( $src ) . ')';
 
 			// 無序清單
 			case 'ul':
@@ -189,24 +226,6 @@ class MoeLog_HTML_To_Markdown {
 			case 'sup':
 			case 'sub':
 				return $inner;
-
-			// 略過不需要的元素
-			case 'script':
-			case 'style':
-			case 'nav':
-			case 'header':
-			case 'footer':
-			case 'aside':
-			case 'form':
-			case 'input':
-			case 'button':
-			case 'select':
-			case 'textarea':
-			case 'iframe':
-			case 'noscript':
-			case 'svg':
-			case 'canvas':
-				return '';
 
 			default:
 				return $inner;
@@ -249,8 +268,11 @@ class MoeLog_HTML_To_Markdown {
 				$text .= $this->convert_node( $li_child );
 			}
 
+			$text = trim( preg_replace( '/\n{2,}/', "\n", $text ) );
+			$text = str_replace( "\n", "\n" . $indent . '  ', $text );
+
 			$prefix   = $ordered ? $index . '. ' : '- ';
-			$items[]  = $indent . $prefix . trim( $text ) . $nested;
+			$items[]  = $indent . $prefix . $text . $nested;
 			$index++;
 		}
 
@@ -263,8 +285,7 @@ class MoeLog_HTML_To_Markdown {
 	private function process_table( DOMNode $node ) {
 		$rows = array();
 
-		$trs = $node->getElementsByTagName( 'tr' );
-		foreach ( $trs as $tr ) {
+		foreach ( $this->get_direct_table_rows( $node ) as $tr ) {
 			$cells = array();
 			foreach ( $tr->childNodes as $child ) {
 				if ( $child->nodeType !== XML_ELEMENT_NODE ) {
@@ -272,7 +293,7 @@ class MoeLog_HTML_To_Markdown {
 				}
 				$cell_tag = strtolower( $child->nodeName );
 				if ( $cell_tag === 'th' || $cell_tag === 'td' ) {
-					$cells[] = trim( $this->process_children( $child ) );
+					$cells[] = $this->escape_table_cell( $this->process_children( $child ) );
 				}
 			}
 			if ( $cells ) {
@@ -301,5 +322,133 @@ class MoeLog_HTML_To_Markdown {
 		}
 
 		return $output;
+	}
+
+	/**
+	 * 只取得目前 table 的直接列，避免把巢狀 table 的 tr 一起算入。
+	 */
+	private function get_direct_table_rows( DOMNode $table ) {
+		$rows = array();
+
+		foreach ( $table->childNodes as $child ) {
+			if ( XML_ELEMENT_NODE !== $child->nodeType ) {
+				continue;
+			}
+
+			$tag = strtolower( $child->nodeName );
+			if ( 'tr' === $tag ) {
+				$rows[] = $child;
+				continue;
+			}
+
+			if ( ! in_array( $tag, array( 'thead', 'tbody', 'tfoot' ), true ) ) {
+				continue;
+			}
+
+			foreach ( $child->childNodes as $row ) {
+				if ( XML_ELEMENT_NODE === $row->nodeType && 'tr' === strtolower( $row->nodeName ) ) {
+					$rows[] = $row;
+				}
+			}
+		}
+
+		return $rows;
+	}
+
+	/**
+	 * 將表格 cell 正規化成單行，並跳脫欄位分隔符號。
+	 */
+	private function escape_table_cell( $text ) {
+		$text = trim( $text );
+		$text = preg_replace( '/\s*[\r\n]+\s*/u', '<br>', $text );
+		return str_replace( '|', '\\|', $text );
+	}
+
+	/**
+	 * 將標題內容正規化成單行，避免內文換行產生新的 Markdown 結構。
+	 */
+	private function normalize_single_line( $text ) {
+		return trim( preg_replace( '/\s*[\r\n]+\s*/u', ' ', $text ) );
+	}
+
+	/**
+	 * 依內容中的反引號長度選擇安全的 inline code delimiter。
+	 */
+	private function format_inline_code( $text ) {
+		$text  = str_replace( array( "\r\n", "\r", "\n" ), ' ', (string) $text );
+		$fence = str_repeat( '`', max( 1, $this->longest_backtick_run( $text ) + 1 ) );
+
+		if ( false !== strpos( $text, '`' ) || preg_match( '/^\s|\s$/u', $text ) ) {
+			return $fence . ' ' . $text . ' ' . $fence;
+		}
+
+		return $fence . $text . $fence;
+	}
+
+	/**
+	 * 回傳字串中最長的連續反引號數量。
+	 */
+	private function longest_backtick_run( $text ) {
+		if ( ! preg_match_all( '/`+/', (string) $text, $matches ) ) {
+			return 0;
+		}
+
+		$lengths = array_map( 'strlen', $matches[0] );
+		return max( $lengths );
+	}
+
+	/**
+	 * 跳脫 link label 與 image alt 中會關閉結構的字元。
+	 */
+	private function escape_link_label( $text ) {
+		return str_replace( array( '\\', '[', ']' ), array( '\\\\', '\\[', '\\]' ), (string) $text );
+	}
+
+	/**
+	 * 將 URL 轉成安全的 Markdown link destination。
+	 */
+	private function escape_url_destination( $url ) {
+		$url = html_entity_decode( trim( (string) $url ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+		return str_replace(
+			array( ' ', '(', ')', '<', '>' ),
+			array( '%20', '%28', '%29', '%3C', '%3E' ),
+			$url
+		);
+	}
+
+	/**
+	 * 取得 lazy-load 圖片的實際來源，略過常見透明 placeholder。
+	 */
+	private function get_image_source( DOMNode $node ) {
+		$src = trim( $node->getAttribute( 'src' ) );
+		if ( $this->is_placeholder_image( $src ) ) {
+			$src = '';
+		}
+
+		foreach ( array( 'data-src', 'data-lazy-src' ) as $attribute ) {
+			if ( '' === $src ) {
+				$candidate = trim( $node->getAttribute( $attribute ) );
+				if ( '' !== $candidate && ! $this->is_placeholder_image( $candidate ) ) {
+					$src = $candidate;
+				}
+			}
+		}
+
+		return $src;
+	}
+
+	/**
+	 * 判斷常見 1x1 或具名 placeholder 圖片。
+	 */
+	private function is_placeholder_image( $src ) {
+		if ( '' === $src ) {
+			return true;
+		}
+
+		if ( 0 === stripos( $src, 'data:image/gif;base64,R0lGODlhAQABA' ) ) {
+			return true;
+		}
+
+		return (bool) preg_match( '/(?:transparent|spacer|placeholder|blank)[^\/]*\.(?:gif|png)(?:[?#].*)?$/i', $src );
 	}
 }
