@@ -18,6 +18,10 @@ This plugin follows the emerging [`llms.txt` proposal](https://llmstxt.org/) for
 - **Smart noise filtering**:
   - Temporarily removes `the_content` filter callbacks from configured noise sources (YARPP, ad injection plugins, related post widgets, etc.) before rendering Markdown.
   - Only the article body reaches the AI — no wasted context window.
+- **Wiki redlink demotion**:
+  - When the Moelog Wiki Links plugin is active, `[[term]]` entries with no matching Wikipedia article are emitted as plain text rather than as links to a search-results or article-creation page. On a rendered page those are styled red, but Markdown keeps no styling — an LLM would just see an ordinary-looking link and could mistake a search page for a citable source.
+  - Entries that do exist keep their real Wikipedia URLs, so no information is lost.
+  - The filter is registered only while a `.md` response is being built and removed in a `finally` block, so visitor-facing pages and the database are untouched. It goes through the public `mwl_link_html` hook, so neither plugin depends on the other being installed.
 - **SEO-safe**:
   - `.md` responses include `X-Robots-Tag: noindex`, preventing search engines from treating them as duplicate content.
   - No `Disallow` in `robots.txt` — AI crawlers like `GPTBot` and `ClaudeBot` can access `.md` files freely.
@@ -65,6 +69,12 @@ add_filter( 'moelog_llms_noise_patterns', function ( $patterns ) {
 ```
 
 Use the narrowest callable or class/method fragment possible. Broad patterns such as `jetpack` can remove useful gallery, shortcode, or formatting callbacks along with sharing widgets. After changing these patterns, compare the Markdown output of a real post before and after the change.
+
+To keep wiki redlinks as links in the Markdown output instead of demoting them to plain text:
+
+```php
+add_filter( 'moelog_llms_demote_wiki_redlinks', '__return_false' );
+```
 
 ## License
 

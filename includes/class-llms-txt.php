@@ -301,12 +301,14 @@ class MoeLog_LLMS_Txt {
 		// （廣告注入、相關文章、社群分享按鈕等），用完再還原。
 		$hook_snapshot   = self::suspend_noise_filters();
 		$global_snapshot = self::snapshot_post_globals();
+		$redlink_filter  = self::suspend_wiki_redlinks();
 
 		try {
 			$GLOBALS['post'] = $post;
 			setup_postdata( $post );
 			$content = apply_filters( 'the_content', $post->post_content );
 		} finally {
+			self::restore_wiki_redlinks( $redlink_filter );
 			self::restore_noise_filters( $hook_snapshot );
 			self::restore_post_globals( $global_snapshot );
 		}
@@ -436,6 +438,55 @@ class MoeLog_LLMS_Txt {
 		}
 
 		return $hook_snapshot;
+	}
+
+	/**
+	 * 產生 .md 期間，把「維基百科尚無此條目」的紅連結降級成純文字。
+	 *
+	 * 紅連結在網頁上會連往維基百科的搜尋頁或條目建立頁，對讀者是合理的；
+	 * 但 Markdown 不保留紅色樣式與 class，LLM 只會看到一個外觀正常的連結，
+	 * 容易把搜尋結果頁誤判成可引用的百科條目。這裡只拿掉連結本身，
+	 * 詞彙文字保留，已存在的條目仍維持正常的維基百科網址。
+	 *
+	 * 走 Moelog Wiki Links 的公開 mwl_link_html filter，兩個外掛之間沒有
+	 * 直接相依；未安裝該外掛時這個 filter 不會被觸發，沒有任何副作用。
+	 *
+	 * @return callable|null 供 restore_wiki_redlinks() 移除用的 callback。
+	 */
+	private static function suspend_wiki_redlinks() {
+		/**
+		 * 是否在產生 Markdown 時把維基紅連結降級為純文字。
+		 *
+		 * @param bool $demote 預設為 true。
+		 */
+		if ( ! apply_filters( 'moelog_llms_demote_wiki_redlinks', true ) ) {
+			return null;
+		}
+
+		$callback = static function ( $html, $lang, $title, $label, $row ) {
+			if ( is_array( $row ) && isset( $row['state'] ) && 'missing' === $row['state'] ) {
+				return esc_html( $label );
+			}
+			return $html;
+		};
+
+		add_filter( 'mwl_link_html', $callback, 10, 5 );
+
+		return $callback;
+	}
+
+	/**
+	 * 移除 suspend_wiki_redlinks() 掛上的臨時 filter。
+	 *
+	 * 一定要在 finally 內呼叫：這個 filter 只該作用於 .md 的產生過程，
+	 * 不能全站永久掛載而改變一般訪客看到的頁面。
+	 *
+	 * @param callable|null $callback suspend_wiki_redlinks() 的回傳值。
+	 */
+	private static function restore_wiki_redlinks( $callback ) {
+		if ( null !== $callback ) {
+			remove_filter( 'mwl_link_html', $callback, 10 );
+		}
 	}
 
 	/**

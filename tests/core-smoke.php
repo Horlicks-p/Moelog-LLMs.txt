@@ -125,7 +125,25 @@ function apply_filters( $tag, $value ) {
 	if ( 'the_content' === $tag && ! empty( $GLOBALS['throw_on_the_content'] ) ) {
 		throw new RuntimeException( 'Simulated third-party callback failure.' );
 	}
+	if ( 'moelog_llms_demote_wiki_redlinks' === $tag && isset( $GLOBALS['demote_redlinks_override'] ) ) {
+		return $GLOBALS['demote_redlinks_override'];
+	}
 	return $value;
+}
+
+function add_filter( $tag, $function, $priority = 10, $accepted_args = 1 ) {
+	global $wp_filter;
+	if ( ! isset( $wp_filter[ $tag ] ) ) {
+		$wp_filter[ $tag ] = new WP_Hook();
+	}
+	$wp_filter[ $tag ]->callbacks[ $priority ][] = array(
+		'function'      => $function,
+		'accepted_args' => $accepted_args,
+	);
+}
+
+function esc_html( $text ) {
+	return htmlspecialchars( (string) $text, ENT_QUOTES, 'UTF-8' );
 }
 
 function remove_filter( $tag, $function, $priority ) {
@@ -241,5 +259,78 @@ $markdown = moelog_call_private( 'build_markdown', array( $prose_post, new MoeLo
 moelog_core_assert( false !== strpos( $markdown, '2026-07-28' ), 'Per-post Markdown must keep the date readable.' );
 moelog_core_assert( false === strpos( $markdown, '2026\\-07\\-28' ), 'Per-post Markdown must not escape date hyphens.' );
 moelog_core_assert( false !== strpos( $markdown, $prose_post->post_excerpt ), 'Excerpt prose must remain readable without excess escaping.' );
+
+/*
+ * 維基紅連結降級：只在產生 .md 期間掛載，且一定要還原。
+ */
+function moelog_count_hook_callbacks( $tag ) {
+	global $wp_filter;
+	if ( ! isset( $wp_filter[ $tag ] ) ) {
+		return 0;
+	}
+	$total = 0;
+	foreach ( $wp_filter[ $tag ]->callbacks as $callbacks ) {
+		$total += count( $callbacks );
+	}
+	return $total;
+}
+
+$wp_filter['mwl_link_html'] = new WP_Hook();
+
+// 正常路徑：跑完之後不能留下任何 callback。
+$GLOBALS['throw_on_the_content'] = false;
+moelog_call_private( 'build_markdown', array( new WP_Post(), new MoeLog_HTML_To_Markdown() ) );
+moelog_core_assert( 0 === moelog_count_hook_callbacks( 'mwl_link_html' ), 'The wiki redlink filter must be removed after building Markdown.' );
+
+// 例外路徑：the_content 丟出例外時，finally 仍必須移除 filter。
+$GLOBALS['throw_on_the_content'] = true;
+try {
+	moelog_call_private( 'build_markdown', array( new WP_Post(), new MoeLog_HTML_To_Markdown() ) );
+	moelog_core_assert( false, 'The simulated the_content exception should propagate.' );
+} catch ( RuntimeException $exception ) {
+	// 預期會走到這裡。
+}
+moelog_core_assert( 0 === moelog_count_hook_callbacks( 'mwl_link_html' ), 'The wiki redlink filter must be removed even when the_content throws.' );
+$GLOBALS['throw_on_the_content'] = false;
+
+// 降級 callback 本身的行為。
+$redlink_callback = moelog_call_private( 'suspend_wiki_redlinks' );
+moelog_core_assert( is_callable( $redlink_callback ), 'suspend_wiki_redlinks() must return a callable.' );
+moelog_core_assert( 1 === moelog_count_hook_callbacks( 'mwl_link_html' ), 'suspend_wiki_redlinks() must register exactly one callback.' );
+
+$missing_html = '<a class="mwl-link mwl-new" href="https://ja.wikipedia.org/w/index.php?search=x">未建立條目</a>';
+$exists_html  = '<a class="mwl-link" href="https://ja.wikipedia.org/wiki/WordPress">WordPress</a>';
+
+moelog_core_assert(
+	'未建立條目' === $redlink_callback( $missing_html, 'ja', '未建立條目', '未建立條目', array( 'state' => 'missing' ) ),
+	'A missing entry must be demoted to plain text.'
+);
+moelog_core_assert(
+	$exists_html === $redlink_callback( $exists_html, 'ja', 'WordPress', 'WordPress', array( 'state' => 'exists' ) ),
+	'An existing entry must keep its Wikipedia link.'
+);
+moelog_core_assert(
+	$exists_html === $redlink_callback( $exists_html, 'ja', 'WordPress', 'WordPress', array( 'state' => 'unknown' ) ),
+	'An unchecked entry must be left alone.'
+);
+moelog_core_assert(
+	$exists_html === $redlink_callback( $exists_html, 'ja', 'WordPress', 'WordPress', null ),
+	'A malformed status row must not break the filter.'
+);
+moelog_core_assert(
+	'&lt;b&gt;x&lt;/b&gt;' === $redlink_callback( $missing_html, 'ja', 'x', '<b>x</b>', array( 'state' => 'missing' ) ),
+	'Demoted labels must be escaped.'
+);
+
+moelog_call_private( 'restore_wiki_redlinks', array( $redlink_callback ) );
+moelog_core_assert( 0 === moelog_count_hook_callbacks( 'mwl_link_html' ), 'restore_wiki_redlinks() must remove the callback.' );
+
+// 站方可用 filter 關掉這個行為。
+$GLOBALS['demote_redlinks_override'] = false;
+$disabled = moelog_call_private( 'suspend_wiki_redlinks' );
+moelog_core_assert( null === $disabled, 'The demotion must be skippable via moelog_llms_demote_wiki_redlinks.' );
+moelog_core_assert( 0 === moelog_count_hook_callbacks( 'mwl_link_html' ), 'Nothing must be registered when demotion is disabled.' );
+moelog_call_private( 'restore_wiki_redlinks', array( $disabled ) );
+unset( $GLOBALS['demote_redlinks_override'] );
 
 echo "Core smoke test passed.\n";
